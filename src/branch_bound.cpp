@@ -9,16 +9,14 @@
 using namespace std;
 
 // Stores all optimization data loaded from CSV files
-struct PortfolioData
-{
+struct PortfolioData {
     vector<string> tickers;
     vector<double> expectedReturns;
     vector<vector<double>> covariance;
 };
 
 // Stores the current state of the Branch and Bound search
-struct BBState
-{
+struct BBState {
     vector<double> allocation;
 
     double currentReturn = 0.0;
@@ -30,20 +28,17 @@ struct BBState
     vector<double> bestAllocation;
 };
 
-// Load expected returns and tickers
+// Load expected returns and covariance matrix
 PortfolioData loadPortfolioData(
-    const string &inputFile,
-    const string &covarianceFile)
-{
+    const string& inputFile,
+    const string& covarianceFile
+) {
     PortfolioData data;
 
-    // -----------------------------
-    // Load optimization_input.csv
-    // -----------------------------
+    // Load optimization input
     ifstream input(inputFile);
 
-    if (!input.is_open())
-    {
+    if (!input.is_open()) {
         cerr << "Error: Could not open " << inputFile << endl;
         return data;
     }
@@ -53,8 +48,7 @@ PortfolioData loadPortfolioData(
     // Skip header
     getline(input, line);
 
-    while (getline(input, line))
-    {
+    while (getline(input, line)) {
         if (line.empty())
             continue;
 
@@ -72,13 +66,10 @@ PortfolioData loadPortfolioData(
 
     input.close();
 
-    // -----------------------------
-    // Load covariance_matrix.csv
-    // -----------------------------
+    // Load covariance matrix
     ifstream covarianceFileStream(covarianceFile);
 
-    if (!covarianceFileStream.is_open())
-    {
+    if (!covarianceFileStream.is_open()) {
         cerr << "Error: Could not open "
              << covarianceFile << endl;
         return data;
@@ -87,20 +78,18 @@ PortfolioData loadPortfolioData(
     // Skip header
     getline(covarianceFileStream, line);
 
-    while (getline(covarianceFileStream, line))
-    {
+    while (getline(covarianceFileStream, line)) {
         if (line.empty())
             continue;
 
         stringstream ss(line);
         vector<double> row;
 
-        // First value may be the ticker
+        // First value is the ticker
         string value;
         getline(ss, value, ',');
 
-        while (getline(ss, value, ','))
-        {
+        while (getline(ss, value, ',')) {
             row.push_back(stod(value));
         }
 
@@ -112,49 +101,82 @@ PortfolioData loadPortfolioData(
     return data;
 }
 
-// Basic Branch and Bound setup
-void branchAndBound(const PortfolioData &data)
-{
+// Branch and Bound search
+void branchAndBound(
+    const PortfolioData& data,
+    BBState& state,
+    int index
+) {
+    // All assets have been assigned an allocation
+    if (index == static_cast<int>(data.expectedReturns.size())) {
 
-    int n = data.expectedReturns.size();
+        // A complete portfolio must use exactly 100%
+        if (abs(state.allocatedWeight - 1.0) < 1e-9) {
 
-    BBState state;
+            // For now, choose the portfolio
+            // with the highest expected return
+            if (state.currentReturn > state.bestReturn) {
+                state.bestReturn = state.currentReturn;
+                state.bestAllocation = state.allocation;
+            }
+        }
 
-    // One allocation value for each asset
-    state.allocation.assign(n, 0.0);
+        return;
+    }
 
-    state.bestAllocation.assign(n, 0.0);
+    // Allowed allocation choices:
+    // 0%, 5%, 10%, 15%, 20%
+    const double choices[] = {
+        0.00,
+        0.05,
+        0.10,
+        0.15,
+        0.20
+    };
 
-    cout << "Branch and Bound setup" << endl;
-    cout << "Number of assets: " << n << endl;
+    for (double weight : choices) {
 
-    cout << "Expected returns loaded: "
-         << data.expectedReturns.size() << endl;
+        // Do not allow allocation to exceed 100%
+        if (state.allocatedWeight + weight > 1.0)
+            continue;
 
-    cout << "Covariance matrix size: "
-         << data.covariance.size()
-         << " x ";
+        // Assign allocation to current asset
+        state.allocation[index] = weight;
 
-    if (!data.covariance.empty())
-        cout << data.covariance[0].size();
-    else
-        cout << 0;
+        // Update current state
+        state.allocatedWeight += weight;
 
-    cout << endl;
+        state.currentReturn +=
+            weight * data.expectedReturns[index];
+
+        // Move to next asset
+        branchAndBound(
+            data,
+            state,
+            index + 1
+        );
+
+        // Undo changes before trying next choice
+        state.currentReturn -=
+            weight * data.expectedReturns[index];
+
+        state.allocatedWeight -= weight;
+
+        state.allocation[index] = 0.0;
+    }
 }
 
-int main()
-{
+int main() {
 
     PortfolioData data = loadPortfolioData(
         "data/Optimization_Input-Table 1.csv",
-        "data/Covariance-Table 1.csv");
+        "data/Covariance-Table 1.csv"
+    );
 
     // Basic validation
     if (data.tickers.empty() ||
         data.expectedReturns.empty() ||
-        data.covariance.empty())
-    {
+        data.covariance.empty()) {
 
         cerr << "Error: Portfolio data could not be loaded."
              << endl;
@@ -162,23 +184,46 @@ int main()
         return 1;
     }
 
-    if (data.tickers.size() != data.expectedReturns.size())
-    {
+    if (data.tickers.size() != data.expectedReturns.size()) {
         cerr << "Error: Ticker and expected return counts do not match."
              << endl;
 
         return 1;
     }
 
-    if (data.covariance.size() != data.expectedReturns.size())
-    {
+    if (data.covariance.size() != data.expectedReturns.size()) {
         cerr << "Error: Covariance matrix dimensions do not match "
              << "the number of assets." << endl;
 
         return 1;
     }
 
-    branchAndBound(data);
+    // Create initial Branch and Bound state
+    BBState state;
+
+    int n = data.expectedReturns.size();
+
+    state.allocation.assign(n, 0.0);
+    state.bestAllocation.assign(n, 0.0);
+
+    // Start Branch and Bound from the first asset
+    branchAndBound(data, state, 0);
+
+    cout << "Number of assets: " << n << endl;
+
+    cout << "Best return: "
+         << state.bestReturn << endl;
+
+    cout << "Best allocation:" << endl;
+
+    for (int i = 0; i < n; i++) {
+        if (state.bestAllocation[i] > 0.0) {
+            cout << data.tickers[i]
+                 << ": "
+                 << state.bestAllocation[i] * 100
+                 << "%" << endl;
+        }
+    }
 
     return 0;
 }
