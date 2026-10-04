@@ -8,6 +8,7 @@
 #include <limits>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 
 using namespace std;
 
@@ -28,7 +29,6 @@ const int SEQ_TOTAL_UNITS = 20;     // 100% = 20 units
 struct SequentialResult
 {
     vector<string> tickers;
-
     vector<double> bestAllocation;
 
     long long evaluatedPortfolios = 0;
@@ -94,8 +94,7 @@ bool loadSequentialExpectedReturns(
         }
 
         tickers.push_back(ticker);
-        expectedReturns.push_back(
-            stod(returnValue));
+        expectedReturns.push_back(stod(returnValue));
     }
 
     file.close();
@@ -110,7 +109,7 @@ bool loadSequentialExpectedReturns(
 // data/Covariance-Table 1.csv
 //
 // First column = ticker
-// Remaining 20 columns = covariance values
+// Remaining columns = covariance values
 // ============================================================
 
 bool loadSequentialCovariance(
@@ -171,6 +170,8 @@ bool loadSequentialCovariance(
 // Calculate portfolio expected return
 //
 // Return = Σ(w_i × μ_i)
+//
+// Used for FINAL verification only.
 // ============================================================
 
 double calculateSequentialReturn(
@@ -195,6 +196,8 @@ double calculateSequentialReturn(
 // Calculate portfolio risk
 //
 // Risk = sqrt(w^T Σ w)
+//
+// Used for FINAL verification only.
 // ============================================================
 
 double calculateSequentialRisk(
@@ -249,10 +252,22 @@ bool isSequentialValidAllocation(
 // 1 unit = 5%
 // 20 units = 100%
 //
+// IMPORTANT:
 // Only mathematical feasibility pruning is used.
-// No return-based or risk-based pruning is used.
 //
-// Therefore every feasible complete portfolio is evaluated.
+// No:
+// - branch and bound
+// - return pruning
+// - risk pruning during partial search
+// - heuristic pruning
+// - greedy search
+// - approximation
+//
+// Therefore every feasible COMPLETE portfolio is evaluated.
+//
+// Performance improvement:
+// Return and variance are accumulated incrementally.
+// This does NOT change the brute-force search space.
 // ============================================================
 
 void sequentialSearch(
@@ -261,6 +276,11 @@ void sequentialSearch(
     vector<double> &allocation,
     const vector<double> &expectedReturns,
     const vector<vector<double>> &covariance,
+
+    // Incremental values
+    double partialReturn,
+    double partialVariance,
+
     long long &evaluatedPortfolios,
     long long &riskFeasiblePortfolios,
     double &bestReturn,
@@ -270,9 +290,9 @@ void sequentialSearch(
     int n =
         static_cast<int>(allocation.size());
 
-    // --------------------------------------------------------
-    // Feasibility pruning
-    // --------------------------------------------------------
+    // ========================================================
+    // FEASIBILITY PRUNING
+    // ========================================================
 
     int remainingAssets =
         n - assetIndex;
@@ -288,9 +308,9 @@ void sequentialSearch(
         return;
     }
 
-    // --------------------------------------------------------
-    // Base case
-    // --------------------------------------------------------
+    // ========================================================
+    // BASE CASE
+    // ========================================================
 
     if (assetIndex == n)
     {
@@ -299,30 +319,27 @@ void sequentialSearch(
             return;
         }
 
-        // This is a complete feasible allocation
-        ++evaluatedPortfolios;
-        if (evaluatedPortfolios % 1000000 == 0)
-        {
-            cout << "Checked: "
-                 << evaluatedPortfolios
-                 << " portfolios"
-                 << endl;
-        }
+        // ----------------------------------------------------
+        // Complete feasible allocation
+        // ----------------------------------------------------
 
+        ++evaluatedPortfolios;
+
+        // ----------------------------------------------------
         // Extra verification using actual percentages
+        // ----------------------------------------------------
+
         if (!isSequentialValidAllocation(allocation))
         {
             return;
         }
 
         // ----------------------------------------------------
-        // Calculate risk
+        // Risk from incremental variance
         // ----------------------------------------------------
 
         double currentRisk =
-            calculateSequentialRisk(
-                allocation,
-                covariance);
+            sqrt(max(0.0, partialVariance));
 
         // ----------------------------------------------------
         // Risk constraint
@@ -337,13 +354,11 @@ void sequentialSearch(
         ++riskFeasiblePortfolios;
 
         // ----------------------------------------------------
-        // Calculate expected return
+        // Return from incremental calculation
         // ----------------------------------------------------
 
         double currentReturn =
-            calculateSequentialReturn(
-                allocation,
-                expectedReturns);
+            partialReturn;
 
         // ----------------------------------------------------
         // Update best portfolio
@@ -351,19 +366,22 @@ void sequentialSearch(
 
         if (currentReturn > bestReturn)
         {
-            bestReturn = currentReturn;
+            bestReturn =
+                currentReturn;
 
-            bestRisk = currentRisk;
+            bestRisk =
+                currentRisk;
 
-            bestAllocation = allocation;
+            bestAllocation =
+                allocation;
         }
 
         return;
     }
 
-    // --------------------------------------------------------
-    // Find valid weight range
-    // --------------------------------------------------------
+    // ========================================================
+    // DETERMINE VALID WEIGHT RANGE
+    // ========================================================
 
     int assetsAfter =
         n - assetIndex - 1;
@@ -379,18 +397,78 @@ void sequentialSearch(
             SEQ_MAX_WEIGHT_UNITS,
             remainingUnits);
 
-    // --------------------------------------------------------
-    // Try every allowed weight
+    // ========================================================
+    // TRY EVERY ALLOWED WEIGHT
     //
     // 0%, 5%, 10%, 15%, 20%
-    // --------------------------------------------------------
+    // ========================================================
 
     for (int units = minUnits;
          units <= maxUnits;
          ++units)
     {
-        allocation[assetIndex] =
+        // ----------------------------------------------------
+        // Current asset weight
+        // ----------------------------------------------------
+
+        double weight =
             units * 0.05;
+
+        allocation[assetIndex] =
+            weight;
+
+        // ====================================================
+        // INCREMENTAL RETURN
+        // ====================================================
+
+        double newReturn =
+            partialReturn +
+            weight *
+                expectedReturns[assetIndex];
+
+        // ====================================================
+        // INCREMENTAL VARIANCE
+        //
+        // New variance =
+        //
+        // Old variance
+        // + wi^2 * Cov(i,i)
+        // + wi*wj*Cov(i,j)
+        // + wj*wi*Cov(j,i)
+        //
+        // Only interactions involving the NEW asset
+        // are calculated.
+        // ====================================================
+
+        double newVariance =
+            partialVariance;
+
+        // Diagonal term
+        newVariance +=
+            weight *
+            weight *
+            covariance[assetIndex][assetIndex];
+
+        // Cross terms with previous assets
+        for (int j = 0;
+             j < assetIndex;
+             ++j)
+        {
+            double previousWeight =
+                allocation[j];
+
+            newVariance +=
+                weight *
+                previousWeight *
+                (
+                    covariance[assetIndex][j] +
+                    covariance[j][assetIndex]
+                );
+        }
+
+        // ====================================================
+        // RECURSE
+        // ====================================================
 
         sequentialSearch(
             assetIndex + 1,
@@ -398,6 +476,8 @@ void sequentialSearch(
             allocation,
             expectedReturns,
             covariance,
+            newReturn,
+            newVariance,
             evaluatedPortfolios,
             riskFeasiblePortfolios,
             bestReturn,
@@ -405,15 +485,25 @@ void sequentialSearch(
             bestAllocation);
     }
 
-    // Backtrack
+    // ========================================================
+    // BACKTRACK
+    // ========================================================
+
     allocation[assetIndex] = 0.0;
 }
 
 // ============================================================
 // FUNCTION CALLED FROM main.cpp
+//
+// requestedN controls input size.
+//
+// Example:
+// seq.exe 10
+// seq.exe 12
+// seq.exe 20
 // ============================================================
 
-void runSequentialExhaustive()
+void runSequentialExhaustive(int requestedN)
 {
     cout << "\n";
     cout << "============================================"
@@ -423,19 +513,24 @@ void runSequentialExhaustive()
     cout << "============================================"
          << endl;
 
-    // --------------------------------------------------------
-    // File paths
-    // --------------------------------------------------------
+    // ========================================================
+    // FILE PATHS
+    //
+    // Run executable from PROJECT ROOT.
+    // Example:
+    // g++ src\sequential_exhaustive.cpp -O3 -o seq.exe
+    // .\seq.exe 10
+    // ========================================================
 
     const string expectedReturnFile =
-        "../data/Optimization_Input-Table 1.csv";
+        "data/Optimization_Input-Table 1.csv";
 
     const string covarianceFile =
-        "../data/Covariance-Table 1.csv";
+        "data/Covariance-Table 1.csv";
 
-    // --------------------------------------------------------
-    // Load data
-    // --------------------------------------------------------
+    // ========================================================
+    // LOAD DATA
+    // ========================================================
 
     vector<string> tickers;
     vector<double> expectedReturns;
@@ -456,51 +551,52 @@ void runSequentialExhaustive()
         return;
     }
 
-    // --------------------------------------------------------
-    // Validate data
-    // --------------------------------------------------------
+    // ========================================================
+    // VALIDATE REQUESTED INPUT SIZE
+    // ========================================================
 
-    int n =
+    int totalAssets =
         static_cast<int>(tickers.size());
 
-    if (n == 0)
+    if (requestedN < 5 ||
+        requestedN > totalAssets)
     {
-        cout << "No assets loaded." << endl;
-        return;
-    }
-
-    if (expectedReturns.size() !=
-        static_cast<size_t>(n))
-    {
-        cout << "Error: Expected return count "
-             << "does not match asset count."
+        cout << "Error: Number of assets must be "
+             << "between 5 and "
+             << totalAssets
+             << "."
              << endl;
 
         return;
     }
 
-    if (covariance.size() !=
-        static_cast<size_t>(n))
-    {
-        cout << "Error: Covariance matrix row count "
-             << "does not match asset count."
-             << endl;
+    // ========================================================
+    // SELECT FIRST N ASSETS
+    //
+    // This is ONLY for testing/scaling.
+    //
+    // The algorithm itself remains exhaustive.
+    // ========================================================
 
-        return;
+    tickers.resize(requestedN);
+
+    expectedReturns.resize(requestedN);
+
+    covariance.resize(requestedN);
+
+    for (int i = 0;
+         i < requestedN;
+         ++i)
+    {
+        covariance[i].resize(requestedN);
     }
 
-    for (int i = 0; i < n; ++i)
-    {
-        if (covariance[i].size() !=
-            static_cast<size_t>(n))
-        {
-            cout << "Error: Covariance matrix is not "
-                 << "square."
-                 << endl;
+    int n =
+        requestedN;
 
-            return;
-        }
-    }
+    // ========================================================
+    // DISPLAY BASIC INFORMATION
+    // ========================================================
 
     cout << "Number of assets: "
          << n
@@ -512,9 +608,72 @@ void runSequentialExhaustive()
          << SEQ_RMAX
          << endl;
 
-    // --------------------------------------------------------
-    // Initialize search
-    // --------------------------------------------------------
+    cout << "Allocation unit: 5%"
+         << endl;
+
+    cout << "Maximum per asset: 20%"
+         << endl;
+
+    cout << "Total allocation: 100%"
+         << endl;
+
+    // ========================================================
+    // CALCULATE EXPECTED FEASIBLE PORTFOLIO COUNT
+    //
+    // Dynamic programming count.
+    // This is NOT used for pruning.
+    // It is only for displaying the expected count.
+    // ========================================================
+
+    vector<unsigned long long> count(
+        SEQ_TOTAL_UNITS + 1,
+        0);
+
+    count[0] = 1;
+
+    for (int asset = 0;
+         asset < n;
+         ++asset)
+    {
+        vector<unsigned long long> nextCount(
+            SEQ_TOTAL_UNITS + 1,
+            0);
+
+        for (int used = 0;
+             used <= SEQ_TOTAL_UNITS;
+             ++used)
+        {
+            if (count[used] == 0)
+            {
+                continue;
+            }
+
+            for (int units = 0;
+                 units <= SEQ_MAX_WEIGHT_UNITS;
+                 ++units)
+            {
+                if (used + units <=
+                    SEQ_TOTAL_UNITS)
+                {
+                    nextCount[used + units] +=
+                        count[used];
+                }
+            }
+        }
+
+        count = nextCount;
+    }
+
+    unsigned long long expectedFeasiblePortfolios =
+        count[SEQ_TOTAL_UNITS];
+
+    cout << "Expected feasible portfolios: "
+         << expectedFeasiblePortfolios
+         << endl;
+
+    // ========================================================
+    // INITIALIZE SEARCH
+    // ========================================================
 
     vector<double> allocation(
         n,
@@ -533,16 +692,16 @@ void runSequentialExhaustive()
 
     double bestRisk = 0.0;
 
-    // --------------------------------------------------------
-    // Start timer
-    // --------------------------------------------------------
+    // ========================================================
+    // START TIMER
+    // ========================================================
 
     auto startTime =
         chrono::high_resolution_clock::now();
 
-    // --------------------------------------------------------
-    // Run sequential exhaustive search
-    // --------------------------------------------------------
+    // ========================================================
+    // RUN SEQUENTIAL EXHAUSTIVE SEARCH
+    // ========================================================
 
     sequentialSearch(
         0,
@@ -550,15 +709,22 @@ void runSequentialExhaustive()
         allocation,
         expectedReturns,
         covariance,
+
+        // Initial partial return
+        0.0,
+
+        // Initial partial variance
+        0.0,
+
         evaluatedPortfolios,
         riskFeasiblePortfolios,
         bestReturn,
         bestRisk,
         bestAllocation);
 
-    // --------------------------------------------------------
-    // Stop timer
-    // --------------------------------------------------------
+    // ========================================================
+    // STOP TIMER
+    // ========================================================
 
     auto endTime =
         chrono::high_resolution_clock::now();
@@ -566,18 +732,73 @@ void runSequentialExhaustive()
     chrono::duration<double> elapsed =
         endTime - startTime;
 
-    // --------------------------------------------------------
-    // Display results
-    // --------------------------------------------------------
+    // ========================================================
+    // FINAL VERIFICATION
+    //
+    // Recalculate the selected portfolio using the original
+    // full equations.
+    // ========================================================
 
-    cout << "\n"
-         << "Evaluated Portfolios: "
+    double verifiedReturn = 0.0;
+    double verifiedRisk = 0.0;
+
+    if (bestReturn !=
+        -numeric_limits<double>::infinity())
+    {
+        verifiedReturn =
+            calculateSequentialReturn(
+                bestAllocation,
+                expectedReturns);
+
+        verifiedRisk =
+            calculateSequentialRisk(
+                bestAllocation,
+                covariance);
+
+        bestReturn =
+            verifiedReturn;
+
+        bestRisk =
+            verifiedRisk;
+    }
+
+    // ========================================================
+    // DISPLAY RESULTS
+    // ========================================================
+
+    cout << "\n";
+    cout << "============================================"
+         << endl;
+
+    cout << "Evaluated Portfolios: "
          << evaluatedPortfolios
          << endl;
 
     cout << "Risk-Feasible Portfolios: "
          << riskFeasiblePortfolios
          << endl;
+
+    // ========================================================
+    // CHECK EXHAUSTIVE COUNT
+    // ========================================================
+
+    if (static_cast<unsigned long long>(
+            evaluatedPortfolios)
+        ==
+        expectedFeasiblePortfolios)
+    {
+        cout << "Portfolio Count Check: PASS"
+             << endl;
+    }
+    else
+    {
+        cout << "Portfolio Count Check: CHECK"
+             << endl;
+    }
+
+    // ========================================================
+    // DISPLAY BEST PORTFOLIO
+    // ========================================================
 
     if (bestReturn ==
         -numeric_limits<double>::infinity())
@@ -591,16 +812,27 @@ void runSequentialExhaustive()
              << endl;
 
         cout << "\nExpected Return (daily): "
+             << fixed
+             << setprecision(10)
              << bestReturn
              << endl;
 
         cout << "Portfolio Risk (daily):  "
+             << fixed
+             << setprecision(10)
              << bestRisk
              << endl;
 
         cout << "Rmax:                    "
+             << fixed
+             << setprecision(10)
              << SEQ_RMAX
              << endl;
+
+        // ====================================================
+        // PORTFOLIO ALLOCATION
+        // Only non-zero allocations are shown.
+        // ====================================================
 
         cout << "\nPortfolio Allocation:"
              << endl;
@@ -617,9 +849,12 @@ void runSequentialExhaustive()
 
         double totalAllocation = 0.0;
 
-        for (int i = 0; i < n; ++i)
+        for (int i = 0;
+             i < n;
+             ++i)
         {
-            if (bestAllocation[i] > SEQ_EPS)
+            if (bestAllocation[i] >
+                SEQ_EPS)
             {
                 cout << left
                      << setw(10)
@@ -644,6 +879,10 @@ void runSequentialExhaustive()
              << endl;
     }
 
+    // ========================================================
+    // EXECUTION TIME
+    // ========================================================
+
     cout << "\nSequential Execution Time: "
          << fixed
          << setprecision(6)
@@ -654,10 +893,38 @@ void runSequentialExhaustive()
     cout << "============================================"
          << endl;
 }
-// TEMPORARY TEST MAIN
-int main()
+
+// ============================================================
+// TEMPORARY STANDALONE MAIN
+//
+// Usage:
+//   .\seq.exe
+//       -> defaults to 10 assets
+//
+//   .\seq.exe 10
+//       -> 10 assets
+//
+//   .\seq.exe 12
+//       -> 12 assets
+//
+//   .\seq.exe 20
+//       -> full 20-asset problem
+//
+// Remove this main when integrating with team's main.cpp.
+// ============================================================
+
+int main(int argc, char *argv[])
 {
-    runSequentialExhaustive();
+    int requestedN = 10;
+
+    if (argc >= 2)
+    {
+        requestedN =
+            atoi(argv[1]);
+    }
+
+    runSequentialExhaustive(
+        requestedN);
 
     return 0;
 }
