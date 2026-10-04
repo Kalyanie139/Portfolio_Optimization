@@ -1208,6 +1208,7 @@ int main(int argc, char *argv[])
         // ====================================================
 
         cout << "\n";
+        cout << fixed << setprecision(4);
         cout << "Execution time: "
              << elapsed.count()
              << " seconds\n";
