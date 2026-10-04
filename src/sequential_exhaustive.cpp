@@ -4,392 +4,652 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <iomanip>
+#include <limits>
+#include <algorithm>
+#include <chrono>
 
 using namespace std;
 
-class PortfolioData
+// ============================================================
+// Constants
+// ============================================================
+
+const double SEQ_RMAX = 0.016;
+const double SEQ_EPS = 1e-9;
+
+const int SEQ_MAX_WEIGHT_UNITS = 4; // 20% = 4 units
+const int SEQ_TOTAL_UNITS = 20;     // 100% = 20 units
+
+// ============================================================
+// Result structure
+// ============================================================
+
+struct SequentialResult
 {
-public:
     vector<string> tickers;
-    vector<double> expectedReturns;
-    vector<vector<double>> covariance;
 
-    // Load expected returns from CSV
-    void loadExpectedReturns(const string &filename)
+    vector<double> bestAllocation;
+
+    long long evaluatedPortfolios = 0;
+    long long riskFeasiblePortfolios = 0;
+
+    double bestReturn =
+        -numeric_limits<double>::infinity();
+
+    double bestRisk = 0.0;
+
+    double executionTime = 0.0;
+};
+
+// ============================================================
+// Load optimization input
+//
+// Reads:
+// data/Optimization_Input-Table 1.csv
+//
+// Columns used:
+// Ticker
+// Expected Return (Daily)
+// ============================================================
+
+bool loadSequentialExpectedReturns(
+    const string &filename,
+    vector<string> &tickers,
+    vector<double> &expectedReturns)
+{
+    ifstream file(filename);
+
+    if (!file.is_open())
     {
-        ifstream file(filename);
+        cerr << "Sequential search error: Could not open "
+             << filename << endl;
 
-        if (!file.is_open())
-        {
-            cout << "Error: Could not open "
-                 << filename << endl;
-            return;
-        }
-
-        string line;
-
-        // Skip header
-        getline(file, line);
-
-        while (getline(file, line))
-        {
-            stringstream ss(line);
-
-            string ticker;
-            string returnValue;
-
-            getline(ss, ticker, ',');
-            getline(ss, returnValue, ',');
-
-            tickers.push_back(ticker);
-            expectedReturns.push_back(stod(returnValue));
-        }
-
-        file.close();
+        return false;
     }
 
-    // Load covariance matrix from CSV
-    void loadCovariance(const string &filename)
-    {
-        ifstream file(filename);
+    string line;
 
-        if (!file.is_open())
+    // Skip header
+    getline(file, line);
+
+    while (getline(file, line))
+    {
+        if (line.empty())
         {
-            cout << "Error: Could not open "
-                 << filename << endl;
-            return;
+            continue;
         }
 
-        string line;
+        stringstream ss(line);
 
-        // Skip header row
-        getline(file, line);
+        string ticker;
+        string returnValue;
 
-        while (getline(file, line))
+        getline(ss, ticker, ',');
+        getline(ss, returnValue, ',');
+
+        if (ticker.empty() || returnValue.empty())
         {
-            stringstream ss(line);
+            continue;
+        }
 
-            string value;
+        tickers.push_back(ticker);
+        expectedReturns.push_back(
+            stod(returnValue));
+    }
 
-            // Skip ticker at beginning of each row
-            getline(ss, value, ',');
+    file.close();
 
-            vector<double> row;
+    return true;
+}
 
-            // Read covariance values
-            while (getline(ss, value, ','))
+// ============================================================
+// Load covariance matrix
+//
+// Reads:
+// data/Covariance-Table 1.csv
+//
+// First column = ticker
+// Remaining 20 columns = covariance values
+// ============================================================
+
+bool loadSequentialCovariance(
+    const string &filename,
+    vector<vector<double>> &covariance)
+{
+    ifstream file(filename);
+
+    if (!file.is_open())
+    {
+        cerr << "Sequential search error: Could not open "
+             << filename << endl;
+
+        return false;
+    }
+
+    string line;
+
+    // Skip header
+    getline(file, line);
+
+    while (getline(file, line))
+    {
+        if (line.empty())
+        {
+            continue;
+        }
+
+        stringstream ss(line);
+
+        string value;
+
+        // Skip ticker
+        getline(ss, value, ',');
+
+        vector<double> row;
+
+        while (getline(ss, value, ','))
+        {
+            if (!value.empty())
             {
                 row.push_back(stod(value));
             }
+        }
 
+        if (!row.empty())
+        {
             covariance.push_back(row);
         }
-
-        file.close();
     }
 
-    // Validate loaded data
-    bool validateData()
-    {
-        int n = tickers.size();
+    file.close();
 
-        if (n == 0)
-        {
-            cout << "Error: No assets found." << endl;
-            return false;
-        }
+    return true;
+}
 
-        // Current project dataset contains 20 assets
-        if (n != 20)
-        {
-            cout << "Error: Expected 20 assets, found "
-                 << n << endl;
-            return false;
-        }
-
-        // Check expected returns
-        if (expectedReturns.size() != n)
-        {
-            cout << "Error: Number of expected returns does not "
-                 << "match number of assets." << endl;
-            return false;
-        }
-
-        // Check covariance matrix rows
-        if (covariance.size() != n)
-        {
-            cout << "Error: Covariance matrix should have "
-                 << n << " rows." << endl;
-            return false;
-        }
-
-        // Check covariance matrix columns
-        for (int i = 0; i < n; i++)
-        {
-            if (covariance[i].size() != n)
-            {
-                cout << "Error: Covariance matrix row "
-                     << i << " does not have "
-                     << n << " values." << endl;
-
-                return false;
-            }
-        }
-
-        return true;
-    }
-};
-
+// ============================================================
 // Calculate portfolio expected return
-double calculateExpectedReturn(
+//
+// Return = Σ(w_i × μ_i)
+// ============================================================
+
+double calculateSequentialReturn(
     const vector<double> &allocation,
     const vector<double> &expectedReturns)
 {
-    double totalReturn = 0.0;
+    double result = 0.0;
 
-    for (int i = 0; i < allocation.size(); i++)
+    for (int i = 0;
+         i < static_cast<int>(allocation.size());
+         ++i)
     {
-        totalReturn +=
-            allocation[i] * expectedReturns[i];
+        result +=
+            allocation[i] *
+            expectedReturns[i];
     }
 
-    return totalReturn;
+    return result;
 }
 
+// ============================================================
 // Calculate portfolio risk
-double calculatePortfolioRisk(
+//
+// Risk = sqrt(w^T Σ w)
+// ============================================================
+
+double calculateSequentialRisk(
     const vector<double> &allocation,
     const vector<vector<double>> &covariance)
 {
+    int n =
+        static_cast<int>(allocation.size());
+
     double variance = 0.0;
 
-    int n = allocation.size();
-
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n; ++i)
     {
-        for (int j = 0; j < n; j++)
+        for (int j = 0; j < n; ++j)
         {
             variance +=
-                allocation[i] * allocation[j] * covariance[i][j];
+                allocation[i] *
+                allocation[j] *
+                covariance[i][j];
         }
     }
 
-    return sqrt(variance);
-}
-
-// Check whether allocation sums to 100%
-bool isValidAllocation(
-    const vector<double> &allocation)
-{
-    double totalAllocation = 0.0;
-
-    for (int i = 0; i < allocation.size(); i++)
+    if (variance < 0.0 &&
+        variance > -SEQ_EPS)
     {
-        totalAllocation += allocation[i];
+        variance = 0.0;
     }
 
-    return abs(totalAllocation - 1.0) < 1e-9;
+    return sqrt(max(0.0, variance));
 }
 
-// Generate all possible portfolios
-void generatePortfolios(
-    int assetIndex,
-    vector<double> &allocation,
-    long long &portfolioCount,
-    double &bestReturn,
-    vector<double> &bestAllocation,
-    const vector<double> &expectedReturns)
-{
-    int n = allocation.size();
+// ============================================================
+// Check allocation = 100%
+// ============================================================
 
-    // Base case:
-    // All assets have been assigned a weight
+bool isSequentialValidAllocation(
+    const vector<double> &allocation)
+{
+    double total = 0.0;
+
+    for (double weight : allocation)
+    {
+        total += weight;
+    }
+
+    return abs(total - 1.0) < SEQ_EPS;
+}
+
+// ============================================================
+// Sequential exhaustive recursion
+//
+// 1 unit = 5%
+// 20 units = 100%
+//
+// Only mathematical feasibility pruning is used.
+// No return-based or risk-based pruning is used.
+//
+// Therefore every feasible complete portfolio is evaluated.
+// ============================================================
+
+void sequentialSearch(
+    int assetIndex,
+    int remainingUnits,
+    vector<double> &allocation,
+    const vector<double> &expectedReturns,
+    const vector<vector<double>> &covariance,
+    long long &evaluatedPortfolios,
+    long long &riskFeasiblePortfolios,
+    double &bestReturn,
+    double &bestRisk,
+    vector<double> &bestAllocation)
+{
+    int n =
+        static_cast<int>(allocation.size());
+
+    // --------------------------------------------------------
+    // Feasibility pruning
+    // --------------------------------------------------------
+
+    int remainingAssets =
+        n - assetIndex;
+
+    if (remainingUnits < 0)
+    {
+        return;
+    }
+
+    if (remainingUnits >
+        remainingAssets * SEQ_MAX_WEIGHT_UNITS)
+    {
+        return;
+    }
+
+    // --------------------------------------------------------
+    // Base case
+    // --------------------------------------------------------
+
     if (assetIndex == n)
     {
-        if (isValidAllocation(allocation))
+        if (remainingUnits != 0)
         {
-            portfolioCount++;
+            return;
+        }
 
-            double currentReturn =
-                calculateExpectedReturn(
-                    allocation,
-                    expectedReturns);
+        // This is a complete feasible allocation
+        ++evaluatedPortfolios;
+        if (evaluatedPortfolios % 100000000 == 0)
+        {
+            cout << "Checked: "
+                 << evaluatedPortfolios
+                 << endl;
+        }
 
-            if (currentReturn > bestReturn)
-            {
-                bestReturn = currentReturn;
-                bestAllocation = allocation;
-            }
+        // Extra verification using actual percentages
+        if (!isSequentialValidAllocation(allocation))
+        {
+            return;
+        }
+
+        // ----------------------------------------------------
+        // Calculate risk
+        // ----------------------------------------------------
+
+        double currentRisk =
+            calculateSequentialRisk(
+                allocation,
+                covariance);
+
+        // ----------------------------------------------------
+        // Risk constraint
+        // ----------------------------------------------------
+
+        if (currentRisk >
+            SEQ_RMAX + SEQ_EPS)
+        {
+            return;
+        }
+
+        ++riskFeasiblePortfolios;
+
+        // ----------------------------------------------------
+        // Calculate expected return
+        // ----------------------------------------------------
+
+        double currentReturn =
+            calculateSequentialReturn(
+                allocation,
+                expectedReturns);
+
+        // ----------------------------------------------------
+        // Update best portfolio
+        // ----------------------------------------------------
+
+        if (currentReturn > bestReturn)
+        {
+            bestReturn = currentReturn;
+
+            bestRisk = currentRisk;
+
+            bestAllocation = allocation;
         }
 
         return;
     }
-}
 
+    // --------------------------------------------------------
+    // Find valid weight range
+    // --------------------------------------------------------
 
-// Allowed allocation values
-double allowedWeights[] =
+    int assetsAfter =
+        n - assetIndex - 1;
+
+    int minUnits =
+        max(
+            0,
+            remainingUnits -
+                SEQ_MAX_WEIGHT_UNITS * assetsAfter);
+
+    int maxUnits =
+        min(
+            SEQ_MAX_WEIGHT_UNITS,
+            remainingUnits);
+
+    // --------------------------------------------------------
+    // Try every allowed weight
+    //
+    // 0%, 5%, 10%, 15%, 20%
+    // --------------------------------------------------------
+
+    for (int units = minUnits;
+         units <= maxUnits;
+         ++units)
     {
-        0.00,
-        0.05,
-        0.10,
-        0.15,
-        0.20
-    };
+        allocation[assetIndex] =
+            units * 0.05;
 
-// Try every allowed weight for this asset
-for (double weight : allowedWeights)
-{
-    allocation[assetIndex] = weight;
-
-    generatePortfolios(
-        assetIndex + 1,
-        allocation,
-        portfolioCount,
-        bestReturn,
-        bestAllocation,
-        expectedReturns);
-}
-}
-
-int main()
-{
-    PortfolioData data;
-
-    // --------------------------------------------------
-    // 1. Load expected returns
-    // --------------------------------------------------
-
-    data.loadExpectedReturns(
-        "../data/expected_returns.csv");
-
-    // --------------------------------------------------
-    // 2. Load covariance matrix
-    // --------------------------------------------------
-
-    data.loadCovariance(
-        "../data/covariance_matrix.csv");
-
-    // --------------------------------------------------
-    // 3. Validate input data
-    // --------------------------------------------------
-
-    if (!data.validateData())
-    {
-        cout << "Input data validation failed."
-             << endl;
-
-        return 1;
+        sequentialSearch(
+            assetIndex + 1,
+            remainingUnits - units,
+            allocation,
+            expectedReturns,
+            covariance,
+            evaluatedPortfolios,
+            riskFeasiblePortfolios,
+            bestReturn,
+            bestRisk,
+            bestAllocation);
     }
 
-    cout << "Input data validation successful."
+    // Backtrack
+    allocation[assetIndex] = 0.0;
+}
+
+// ============================================================
+// FUNCTION CALLED FROM main.cpp
+// ============================================================
+
+void runSequentialExhaustive()
+{
+    cout << "\n";
+    cout << "============================================"
+         << endl;
+    cout << "     SEQUENTIAL EXHAUSTIVE SEARCH"
+         << endl;
+    cout << "============================================"
          << endl;
 
-    // --------------------------------------------------
-    // 4. Test portfolio generation
-    // --------------------------------------------------
-    //
-    // IMPORTANT:
-    // Do NOT generate all portfolios for 20 assets yet.
-    //
-    // 20 assets -> 5^20 combinations
-    // = 95,367,431,640,625
-    //
-    // Therefore, we first test the recursion
-    // using only 3 assets.
-    // --------------------------------------------------
+    // --------------------------------------------------------
+    // File paths
+    // --------------------------------------------------------
 
-    vector<double> testAllocation(3, 0.0);
+    const string expectedReturnFile =
+        "data/Optimization_Input-Table 1.csv";
 
-    long long portfolioCount = 0;
+    const string covarianceFile =
+        "data/Covariance-Table 1.csv";
 
-    generatePortfolios(
-        0,
-        testAllocation,
-        portfolioCount);
+    // --------------------------------------------------------
+    // Load data
+    // --------------------------------------------------------
 
-    cout << "\nTest portfolio generation"
+    vector<string> tickers;
+    vector<double> expectedReturns;
+    vector<vector<double>> covariance;
+
+    if (!loadSequentialExpectedReturns(
+            expectedReturnFile,
+            tickers,
+            expectedReturns))
+    {
+        return;
+    }
+
+    if (!loadSequentialCovariance(
+            covarianceFile,
+            covariance))
+    {
+        return;
+    }
+
+    // --------------------------------------------------------
+    // Validate data
+    // --------------------------------------------------------
+
+    int n =
+        static_cast<int>(tickers.size());
+
+    if (n == 0)
+    {
+        cout << "No assets loaded." << endl;
+        return;
+    }
+
+    if (expectedReturns.size() !=
+        static_cast<size_t>(n))
+    {
+        cout << "Error: Expected return count "
+             << "does not match asset count."
+             << endl;
+
+        return;
+    }
+
+    if (covariance.size() !=
+        static_cast<size_t>(n))
+    {
+        cout << "Error: Covariance matrix row count "
+             << "does not match asset count."
+             << endl;
+
+        return;
+    }
+
+    for (int i = 0; i < n; ++i)
+    {
+        if (covariance[i].size() !=
+            static_cast<size_t>(n))
+        {
+            cout << "Error: Covariance matrix is not "
+                 << "square."
+                 << endl;
+
+            return;
+        }
+    }
+
+    cout << "Number of assets: "
+         << n
          << endl;
 
-    cout << "Number of portfolios generated: "
-         << portfolioCount
+    cout << "Risk Limit (Rmax): "
+         << fixed
+         << setprecision(10)
+         << SEQ_RMAX
          << endl;
 
-    // --------------------------------------------------
-    // 5. Example portfolio
-    // --------------------------------------------------
+    // --------------------------------------------------------
+    // Initialize search
+    // --------------------------------------------------------
 
     vector<double> allocation(
-        data.tickers.size(),
+        n,
         0.0);
 
-    // Example allocation:
-    // Asset 0 = 20%
-    // Asset 1 = 10%
-    // Asset 2 = 5%
+    vector<double> bestAllocation(
+        n,
+        0.0);
 
-    allocation[0] = 0.20;
-    allocation[1] = 0.10;
-    allocation[2] = 0.05;
+    long long evaluatedPortfolios = 0;
 
-    // --------------------------------------------------
-    // 6. Check allocation validity
-    // --------------------------------------------------
+    long long riskFeasiblePortfolios = 0;
 
-    if (isValidAllocation(allocation))
+    double bestReturn =
+        -numeric_limits<double>::infinity();
+
+    double bestRisk = 0.0;
+
+    // --------------------------------------------------------
+    // Start timer
+    // --------------------------------------------------------
+
+    auto startTime =
+        chrono::high_resolution_clock::now();
+
+    // --------------------------------------------------------
+    // Run sequential exhaustive search
+    // --------------------------------------------------------
+
+    sequentialSearch(
+        0,
+        SEQ_TOTAL_UNITS,
+        allocation,
+        expectedReturns,
+        covariance,
+        evaluatedPortfolios,
+        riskFeasiblePortfolios,
+        bestReturn,
+        bestRisk,
+        bestAllocation);
+
+    // --------------------------------------------------------
+    // Stop timer
+    // --------------------------------------------------------
+
+    auto endTime =
+        chrono::high_resolution_clock::now();
+
+    chrono::duration<double> elapsed =
+        endTime - startTime;
+
+    // --------------------------------------------------------
+    // Display results
+    // --------------------------------------------------------
+
+    cout << "\n"
+         << "Evaluated Portfolios: "
+         << evaluatedPortfolios
+         << endl;
+
+    cout << "Risk-Feasible Portfolios: "
+         << riskFeasiblePortfolios
+         << endl;
+
+    if (bestReturn ==
+        -numeric_limits<double>::infinity())
     {
-        cout << "\nAllocation is valid."
+        cout << "\nNo portfolio satisfies Rmax."
              << endl;
     }
     else
     {
-        cout << "\nAllocation is invalid."
+        cout << "\nOptimal Portfolio:"
              << endl;
-    }
 
-    // --------------------------------------------------
-    // 7. Display example allocation
-    // --------------------------------------------------
+        cout << "\nExpected Return (daily): "
+             << bestReturn
+             << endl;
 
-    cout << "\nExample Portfolio Allocation:"
-         << endl;
+        cout << "Portfolio Risk (daily):  "
+             << bestRisk
+             << endl;
 
-    for (int i = 0;
-         i < allocation.size();
-         i++)
-    {
-        cout << data.tickers[i]
-             << ": "
-             << allocation[i] * 100
+        cout << "Rmax:                    "
+             << SEQ_RMAX
+             << endl;
+
+        cout << "\nPortfolio Allocation:"
+             << endl;
+
+        cout << left
+             << setw(10)
+             << "Ticker"
+             << setw(15)
+             << "Allocation"
+             << endl;
+
+        cout << "-----------------------------------"
+             << endl;
+
+        double totalAllocation = 0.0;
+
+        for (int i = 0; i < n; ++i)
+        {
+            if (bestAllocation[i] > SEQ_EPS)
+            {
+                cout << left
+                     << setw(10)
+                     << tickers[i]
+                     << setw(15)
+                     << fixed
+                     << setprecision(0)
+                     << bestAllocation[i] * 100.0
+                     << "%"
+                     << endl;
+            }
+
+            totalAllocation +=
+                bestAllocation[i];
+        }
+
+        cout << "\nTotal Allocation: "
+             << fixed
+             << setprecision(0)
+             << totalAllocation * 100.0
              << "%"
              << endl;
     }
 
-    // --------------------------------------------------
-    // 8. Calculate expected return
-    // --------------------------------------------------
-
-    double portfolioReturn =
-        calculateExpectedReturn(
-            allocation,
-            data.expectedReturns);
-
-    cout << "\nPortfolio Expected Daily Return: "
-         << portfolioReturn
+    cout << "\nSequential Execution Time: "
+         << fixed
+         << setprecision(6)
+         << elapsed.count()
+         << " seconds"
          << endl;
 
-    // --------------------------------------------------
-    // 9. Calculate portfolio risk
-    // --------------------------------------------------
-
-    double portfolioRisk =
-        calculatePortfolioRisk(
-            allocation,
-            data.covariance);
-
-    cout << "\nPortfolio Risk: "
-         << portfolioRisk
+    cout << "============================================"
          << endl;
-
-    return 0;
 }
