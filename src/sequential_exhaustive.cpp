@@ -301,10 +301,11 @@ void sequentialSearch(
 
         // This is a complete feasible allocation
         ++evaluatedPortfolios;
-        if (evaluatedPortfolios % 100000000 == 0)
+        if (evaluatedPortfolios % 1000000 == 0)
         {
             cout << "Checked: "
                  << evaluatedPortfolios
+                 << " portfolios"
                  << endl;
         }
 
@@ -427,10 +428,10 @@ void runSequentialExhaustive()
     // --------------------------------------------------------
 
     const string expectedReturnFile =
-        "data/Optimization_Input-Table 1.csv";
+        "../data/Optimization_Input-Table 1.csv";
 
     const string covarianceFile =
-        "data/Covariance-Table 1.csv";
+        "../data/Covariance-Table 1.csv";
 
     // --------------------------------------------------------
     // Load data
@@ -652,4 +653,11 @@ void runSequentialExhaustive()
 
     cout << "============================================"
          << endl;
+}
+// TEMPORARY TEST MAIN
+int main()
+{
+    runSequentialExhaustive();
+
+    return 0;
 }
