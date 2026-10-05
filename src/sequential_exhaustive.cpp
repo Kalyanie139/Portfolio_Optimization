@@ -180,9 +180,7 @@ double calculateSequentialReturn(
 {
     double result = 0.0;
 
-    for (int i = 0;
-         i < static_cast<int>(allocation.size());
-         ++i)
+    for (int i = 0; i < allocation.size(); ++i)
     {
         result +=
             allocation[i] *
