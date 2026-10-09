@@ -1,2 +1,18 @@
+# compiled binaries
+bf_openmp
+branch_bound_parallel
+branch_bound_seq
+sequential_exhaustive
 branch_bound
 *.exe
+*.out
+*.o
+*.dSYM/
+
+# editor and OS files
+.vscode/
+.DS_Store
+
+# python
+__pycache__/
+*.pyc
